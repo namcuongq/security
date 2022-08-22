@@ -6,6 +6,10 @@ I prefer to write my own tool for my own use because of the following reasons:
  
 You can use the tools in pentest or redteam work. If the tool is detected by AV, don't worry, edit the code a bit and then build again. :)
 
+## Developing...
+* [ ] TShell - Basic shell like C2 Framework which can easily bypass AV and applocker
+* [ ] DNS Tunnel - Get sensitive data through DNS
+
 ## List of my tools
 
 
