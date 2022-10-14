@@ -20,7 +20,7 @@ import (
 var (
 	hostFile      = flag.String("H", "", "File containing target hostnames or IP addresses")
 	userFile      = flag.String("U", "", "File containing usernames to brute force")
-	passFile      = flag.String("P", "", "File containing usernames to brute force")
+	passFile      = flag.String("P", "", "File containing passwords to brute force")
 	host          = flag.String("h", "", "Target hostname or IP address")
 	user          = flag.String("u", "", "User to brute force")
 	password      = flag.String("p", "", "Password to brute force")
@@ -28,6 +28,7 @@ var (
 	concurrent    = flag.Int("c", 10, "Concurrency/threads level")
 	sock5         = flag.String("sock5", "", "Sock5 proxy address")
 	output        = flag.String("o", "success.txt", "Output file")
+	cmd           = flag.String("x", "hostname", "execute command after ssh")
 	timer         = flag.Duration("timer", 300*time.Millisecond, "Set timeout to ssh dial response")
 	channelResult = make(chan string, 0)
 
@@ -55,7 +56,8 @@ func sshConnect(ip, user, pass string) {
 
 		conn, err := dialer.Dial("tcp", ip)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Printf("%s [%s]: %v ---\n", color.RedString("Failed"), ip, err)
+			return
 		}
 
 		c, chans, reqs, err := ssh.NewClientConn(conn, ip, config)
@@ -78,20 +80,24 @@ func sshConnect(ip, user, pass string) {
 	fmt.Printf("%s [%s]: %s/%s\n", color.BlueString("Success: "), color.GreenString(ip), color.GreenString(user), color.GreenString(pass))
 	successList[fmt.Sprintf("%s@%s", user, ip)] = true
 
-	session, err := sshClient.NewSession()
-	defer session.Close()
-	if err != nil {
-		fmt.Printf("%s %s %v\n", color.RedString("\nCreate session error:"), ip, err)
-		return
-	}
+	if len(*cmd) > 0 {
+		session, err := sshClient.NewSession()
+		if err != nil {
+			fmt.Printf("%s %s %v\n", color.RedString("\nCreate session error:"), ip, err)
+			return
+		}
+		defer session.Close()
 
-	combo, err := session.CombinedOutput("hostname")
-	if err != nil {
-		fmt.Printf("%s %s\n", color.RedString("Command hostname error on: "), ip)
-		return
+		combo, err := session.CombinedOutput(*cmd)
+		if err != nil {
+			fmt.Printf("%s %s\n", color.RedString("Command "+*cmd+" error on: "), ip)
+			return
+		} else {
+			output := strings.ReplaceAll(string(combo), "\n", "")
+			channelResult <- fmt.Sprintf("[%s] %s/%s - [%s] %s", ip, user, pass, *cmd, output)
+		}
 	} else {
-		hostname := strings.ReplaceAll(string(combo), "\n", "")
-		channelResult <- fmt.Sprintf("[%s] %s %s/%s", hostname, ip, user, pass)
+		channelResult <- fmt.Sprintf("[%s] %s/%s", ip, user, pass)
 	}
 }
 
