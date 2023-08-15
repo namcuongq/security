@@ -1,3 +1,100 @@
+// package main
+
+// import (
+// 	"bufio"
+// 	"fmt"
+// 	"os"
+// 	"unsafe"
+
+// 	"golang.org/x/sys/windows"
+// )
+
+// func main() {
+
+// 	var (
+// 		sI windows.StartupInfo
+// 		pI windows.ProcessInformation
+
+// 		stdOutPipeRead  windows.Handle
+// 		stdOutPipeWrite windows.Handle
+// 		stdErrPipeRead  windows.Handle
+// 		stdErrPipeWrite windows.Handle
+// 		stdInPipeRead   windows.Handle
+// 		stdInPipeWrite  windows.Handle
+// 	)
+
+// 	sa := windows.SecurityAttributes{
+// 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+// 		SecurityDescriptor: nil,
+// 		InheritHandle:      1,
+// 	}
+
+// 	windows.CreatePipe(&stdOutPipeRead, &stdOutPipeWrite, &sa, 0)
+// 	windows.CreatePipe(&stdErrPipeRead, &stdErrPipeWrite, &sa, 0)
+// 	windows.CreatePipe(&stdInPipeRead, &stdInPipeWrite, &sa, 0)
+
+// 	sI.Flags = windows.STARTF_USESTDHANDLES
+// 	sI.StdErr = stdErrPipeWrite
+// 	sI.StdOutput = stdOutPipeWrite
+// 	sI.StdInput = stdInPipeRead
+
+// 	argv := windows.StringToUTF16Ptr("powershell")
+// 	windows.CreateProcess(
+// 		nil,
+// 		argv,
+// 		nil,
+// 		nil,
+// 		true,
+// 		windows.CREATE_NEW_CONSOLE,
+// 		nil,
+// 		nil,
+// 		&sI,
+// 		&pI)
+
+// 	// windows.SleepEx(500, false)
+
+// 	go readPipe(stdErrPipeRead)
+// 	go readPipe(stdOutPipeRead)
+
+// 	writePipe(stdInPipeWrite)
+
+// 	windows.CloseHandle(stdOutPipeWrite)
+// 	windows.CloseHandle(stdErrPipeWrite)
+// 	windows.CloseHandle(stdInPipeWrite)
+
+// 	windows.CloseHandle(stdOutPipeRead)
+// 	windows.CloseHandle(stdErrPipeRead)
+// 	windows.CloseHandle(stdInPipeRead)
+// }
+
+// func writePipe(pipe windows.Handle) {
+// 	var read uint32 = 0
+// 	scanner := bufio.NewScanner(os.Stdin)
+// 	for scanner.Scan() {
+// 		err := windows.WriteFile(pipe, []byte(scanner.Text()+"\n"), &read, nil)
+// 		if err != nil {
+// 			fmt.Println(err)
+// 			return
+// 		}
+// 	}
+
+// 	if scanner.Err() != nil {
+// 		// Handle error.
+// 	}
+// }
+
+// func readPipe(pipe windows.Handle) {
+// 	buf := make([]byte, 1024)
+// 	var (
+// 		read uint32 = 0
+// 		err  error
+// 	)
+
+//		for err == nil {
+//			err = windows.ReadFile(pipe, buf, &read, nil)
+//			fmt.Printf(string(buf[:read]))
+//		}
+//	}
 package main
 
 import (
@@ -5,6 +102,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"runtime"
 	"strconv"
@@ -28,12 +126,20 @@ var (
 	concurrent    = flag.Int("c", 10, "Concurrency/threads level")
 	sock5         = flag.String("sock5", "", "Sock5 proxy address")
 	output        = flag.String("o", "success.txt", "Output file")
-	cmd           = flag.String("x", "hostname", "execute command after ssh")
+	cmd           = flag.String("x", "", "execute command after ssh")
+	debug         = flag.Bool("debug", false, "debug mode")
 	timer         = flag.Duration("timer", 300*time.Millisecond, "Set timeout to ssh dial response")
 	channelResult = make(chan string, 0)
 
 	successList = make(map[string]bool, 0)
 )
+
+func show(mess ...any) {
+	if *debug {
+		fmt.Print(time.Now().Format("15:04:05 02/01/2006"), "[Debug]")
+		fmt.Println(mess...)
+	}
+}
 
 func sshConnect(ip, user, pass string) {
 	if successList[fmt.Sprintf("%s@%s", user, ip)] {
@@ -47,64 +153,106 @@ func sshConnect(ip, user, pass string) {
 		Timeout:         *timer,
 	}
 
-	var sshClient *ssh.Client
-	if len(*sock5) > 0 {
-		dialer, err := proxy.SOCKS5("tcp", *sock5, nil, proxy.Direct)
-		if err != nil {
-			log.Fatal(err)
+	again := 0
+	var (
+		sshClient *ssh.Client
+		conn      net.Conn
+		chans     <-chan ssh.NewChannel
+		reqs      <-chan *ssh.Request
+		c         ssh.Conn
+		err       error
+	)
+
+	for {
+		if len(*sock5) > 0 {
+			dialer, err := proxy.SOCKS5("tcp", *sock5, nil, proxy.Direct)
+			if err != nil {
+				log.Fatal(err)
+			}
+			show("dial", ip, user, pass)
+			conn, err = dialer.Dial("tcp", ip)
+			show("dial", ip, user, pass, "done")
+			if err != nil {
+				fmt.Printf("%s [%s]: %v ---\n", color.RedString("Failed"), ip, err)
+				return
+			}
+
+		} else {
+			show("dial", ip, user, pass)
+			conn, err = net.DialTimeout("tcp", ip, config.Timeout)
+			show("dial", ip, user, pass, "done")
+			if err != nil {
+				fmt.Printf("%s [%s]: %s/%s %v ---\n", color.RedString("Failed"), ip, user, pass, err)
+				return
+			}
+
 		}
 
-		conn, err := dialer.Dial("tcp", ip)
+		show("handshake", ip, user, pass)
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		c, chans, reqs, err = ssh.NewClientConn(conn, ip, config)
+		show("handshake", ip, user, pass, "done")
 		if err != nil {
-			fmt.Printf("%s [%s]: %v ---\n", color.RedString("Failed"), ip, err)
-			return
-		}
+			if strings.Contains(err.Error(), "i/o timeout") && again < 3 {
+				fmt.Printf("%s [%s]: %s/%s %v ---\n", color.RedString("Failed"), ip, user, pass, err)
+				fmt.Printf("%s [%s]: Try again(%d) %s/%s ---\n", color.RedString("Failed"), ip, again+1, user, pass)
+				again++
+				continue
+			}
 
-		c, chans, reqs, err := ssh.NewClientConn(conn, ip, config)
-		if err != nil {
-			fmt.Printf("%s [%s]: %s/%s ---\n", color.RedString("Failed"), ip, user, pass)
+			fmt.Printf("%s [%s]: %s/%s %v ---\n", color.RedString("Failed"), ip, user, pass, err)
 			return
 		}
-		sshClient = ssh.NewClient(c, chans, reqs)
 		defer c.Close()
-
-	} else {
-		var err error
-		sshClient, err = ssh.Dial("tcp", ip, config)
-		if err != nil {
-			fmt.Printf("%s [%s]: %s/%s ---\n", color.RedString("Failed"), ip, user, pass)
-			return
-		}
+		break
 	}
+
+	show("connect", ip, user, pass)
+	sshClient = ssh.NewClient(c, chans, reqs)
+	show("connect", ip, user, pass, "done")
+	if err != nil {
+		fmt.Printf("%s [%s]: %s/%s %v---\n", color.RedString("Failed"), ip, user, pass, err)
+		return
+	}
+	defer sshClient.Close()
 
 	fmt.Printf("%s [%s]: %s/%s\n", color.BlueString("Success: "), color.GreenString(ip), color.GreenString(user), color.GreenString(pass))
 	successList[fmt.Sprintf("%s@%s", user, ip)] = true
-
+	message := fmt.Sprintf("[%s] %s/%s", ip, user, pass)
 	if len(*cmd) > 0 {
+		show("session", ip, user, pass, *cmd)
 		session, err := sshClient.NewSession()
+		show("session", ip, user, pass, *cmd, "done")
 		if err != nil {
 			fmt.Printf("%s %s %v\n", color.RedString("\nCreate session error:"), ip, err)
 			return
 		}
 		defer session.Close()
 
+		output := ""
+		show("command", ip, user, pass, *cmd)
 		combo, err := session.CombinedOutput(*cmd)
+		show("command", ip, user, pass, *cmd, "done")
 		if err != nil {
-			fmt.Printf("%s %s\n", color.RedString("Command "+*cmd+" error on: "), ip)
-			return
+			fmt.Printf("%s %s %v\n", color.RedString("Command "+*cmd+" error on: "), ip, err)
+			output = "Error"
 		} else {
-			output := strings.ReplaceAll(string(combo), "\n", "")
-			channelResult <- fmt.Sprintf("[%s] %s/%s - [%s] %s", ip, user, pass, *cmd, output)
+			output = strings.ReplaceAll(string(combo), "\n", "")
 		}
-	} else {
-		channelResult <- fmt.Sprintf("[%s] %s/%s", ip, user, pass)
+		message = fmt.Sprintf("[%s] %s/%s - [%s] %s", ip, user, pass, *cmd, output)
 	}
+
+	show("channel", ip, user, pass)
+	channelResult <- message
+	show("channel", ip, user, pass, *cmd, output, "done")
+
 }
 
 func writeOutput(outputWriter *os.File) {
 	for {
 		select {
 		case msg := <-channelResult:
+			show("select", msg)
 			if msg == "0" {
 				return
 			}
